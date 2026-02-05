@@ -25,7 +25,7 @@ def init_db():
                  capacidad INTEGER,
                  FOREIGN KEY(ciclo_id) REFERENCES ciclos(id))''')
     
-    # Tabla Alumnos
+    # Tabla Alumnos (Incluye campo 'condicion')
     c.execute('''CREATE TABLE IF NOT EXISTS alumnos (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  nombre TEXT,
@@ -34,7 +34,8 @@ def init_db():
                  direccion TEXT,
                  nivel TEXT,
                  apoderado TEXT,
-                 fecha_registro DATE)''')
+                 fecha_registro DATE,
+                 condicion TEXT)''')
     
     # Tabla Matrículas
     c.execute('''CREATE TABLE IF NOT EXISTS matriculas (
@@ -61,7 +62,13 @@ def init_db():
                  horario_destino_id INTEGER,
                  fecha_destino DATE,
                  asistio BOOLEAN DEFAULT 0)''')
-                 
+    
+    # PARCHE DE SEGURIDAD: Agregar columna condicion si la tabla ya existía sin ella
+    try:
+        c.execute("ALTER TABLE alumnos ADD COLUMN condicion TEXT")
+    except:
+        pass # La columna ya existe, ignoramos el error
+
     conn.commit()
     conn.close()
 
@@ -147,12 +154,14 @@ elif menu == "Matrícula":
         with col2:
             nivel = st.selectbox("Nivel", ["Básico", "Intermedio", "Avanzado"])
             apoderado = st.text_input("Nombre Apoderado")
+            # CAMPO DE CONDICIÓN
+            condicion = st.text_area("Condición Especial / Observaciones Médicas (Opcional)", 
+                                     placeholder="Ej: Asma, TDAH, Alergia al cloro, etc. Dejar vacío si no aplica.")
             
         st.divider()
         st.write("Selección de Horario")
         
         # Obtener horarios con cupos disponibles
-        # Nota: En un sistema real haríamos un query count para validar cupos exactos
         ciclos_disp = run_query("SELECT id, nombre FROM ciclos", return_data=True)
         if ciclos_disp:
             c_dict = {n: i for i, n in ciclos_disp}
@@ -180,11 +189,10 @@ elif menu == "Matrícula":
             if submitted:
                 h_selected_id = opciones_horario[sel_horario_txt]
                 if h_selected_id and nombre and apellido:
-                    # Insertar Alumno
-                    run_query("INSERT INTO alumnos (nombre, apellido, telefono, direccion, nivel, apoderado, fecha_registro) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                              (nombre, apellido, telefono, direccion, nivel, apoderado, date.today()))
+                    # Insertar Alumno con CONDICIÓN
+                    run_query("INSERT INTO alumnos (nombre, apellido, telefono, direccion, nivel, apoderado, fecha_registro, condicion) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                              (nombre, apellido, telefono, direccion, nivel, apoderado, date.today(), condicion))
                     
-                    # Obtener ID del alumno recién creado
                     alumno_id = run_query("SELECT last_insert_rowid()", return_data=True)[0][0]
                     
                     # Matricular
@@ -221,13 +229,14 @@ elif menu == "Asistencia":
         search_term = st.text_input("🔍 Buscar alumno por nombre...", "")
         
         # Lógica principal: Traer alumnos matriculados + Alumnos en recuperación para este día
+        # SE INCLUYE EL CAMPO 'condicion'
         query_alumnos = """
-            SELECT a.id, a.nombre, a.apellido, 'Matriculado' as tipo
+            SELECT a.id, a.nombre, a.apellido, a.condicion, 'Matriculado' as tipo
             FROM alumnos a
             JOIN matriculas m ON a.id = m.alumno_id
             WHERE m.horario_id = ?
             UNION
-            SELECT a.id, a.nombre, a.apellido, 'RECUPERACIÓN' as tipo
+            SELECT a.id, a.nombre, a.apellido, a.condicion, 'RECUPERACIÓN' as tipo
             FROM alumnos a
             JOIN recuperaciones_programadas rp ON a.id = rp.alumno_id
             WHERE rp.horario_destino_id = ? AND rp.fecha_destino = ?
@@ -236,8 +245,8 @@ elif menu == "Asistencia":
         alumnos_lista = run_query(query_alumnos, (horario_id_actual, horario_id_actual, fecha_hoy), return_data=True)
         
         if alumnos_lista:
-            # Convertir a DataFrame para mejor manejo visual
-            df_asist = pd.DataFrame(alumnos_lista, columns=['ID', 'Nombre', 'Apellido', 'Condición'])
+            # Convertir a DataFrame incluyendo columna Condicion
+            df_asist = pd.DataFrame(alumnos_lista, columns=['ID', 'Nombre', 'Apellido', 'Condicion_Medica', 'Tipo'])
             
             # Filtro de búsqueda
             if search_term:
@@ -250,13 +259,27 @@ elif menu == "Asistencia":
                 estados = {}
                 for index, row in df_asist.iterrows():
                     col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
+                    
+                    # LOGICA DE VISUALIZACIÓN DE CONDICIÓN
+                    tiene_condicion = row['Condicion_Medica'] and row['Condicion_Medica'].strip() != ""
+                    
                     with col1:
-                        st.markdown(f"**{row['Nombre']} {row['Apellido']}**")
-                    with col2:
-                        if row['Condición'] == 'RECUPERACIÓN':
-                            st.warning("⚠️ Recupera hoy")
+                        if tiene_condicion:
+                            # NOMBRE EN ROJO CON ALERTA
+                            st.markdown(f"🔴 :red[**{row['Nombre']} {row['Apellido']}**]")
+                            st.caption(f"⚠️ **OJO:** {row['Condicion_Medica']}")
                         else:
-                            st.caption("Regular")
+                            st.markdown(f"**{row['Nombre']} {row['Apellido']}**")
+                    
+                    with col2:
+                        if row['Tipo'] == 'RECUPERACIÓN':
+                            st.warning("Recupera hoy")
+                        else:
+                            if tiene_condicion:
+                                st.caption("Regular (Con Obs.)")
+                            else:
+                                st.caption("Regular")
+                                
                     with col3:
                         # Verificar si ya se tomó asistencia antes
                         prev_asist = run_query("SELECT estado FROM asistencia WHERE alumno_id=? AND fecha=? AND horario_id=?", 
@@ -276,13 +299,11 @@ elif menu == "Asistencia":
                         # Upsert lógica simplificada: borrar previo e insertar nuevo
                         run_query("DELETE FROM asistencia WHERE alumno_id=? AND fecha=? AND horario_id=?", (alum_id, fecha_hoy, horario_id_actual))
                         
-                        es_recup = 1 if df_asist[df_asist['ID'] == alum_id]['Condición'].values[0] == 'RECUPERACIÓN' else 0
+                        es_recup = 1 if df_asist[df_asist['ID'] == alum_id]['Tipo'].values[0] == 'RECUPERACIÓN' else 0
                         
                         run_query("INSERT INTO asistencia (alumno_id, horario_id, fecha, estado, es_recuperacion) VALUES (?, ?, ?, ?, ?)",
                                   (alum_id, horario_id_actual, fecha_hoy, estado, es_recup))
                         
-                        # Si era recuperación y vino, marcarla como completada (opcional, lógica compleja)
-                    
                     st.success("Asistencia guardada correctamente.")
         else:
             st.info("No hay alumnos inscritos en este horario o recuperaciones programadas.")
@@ -329,7 +350,12 @@ elif menu == "Reportes":
         
         # Datos básicos
         datos = run_query("SELECT * FROM alumnos WHERE id=?", (id_sel,), return_data=True)[0]
+        # datos: id, nombre, apellido, telefono, direccion, nivel, apoderado, fecha_registro, condicion
+        
         st.write(f"**Apoderado:** {datos[6]} | **Tel:** {datos[3]} | **Nivel:** {datos[5]}")
+        
+        if datos[8] and datos[8].strip() != "":
+            st.error(f"⚠️ **CONDICIÓN ESPECIAL:** {datos[8]}")
         
         # Historial de Asistencia
         st.subheader("Historial de Asistencia")

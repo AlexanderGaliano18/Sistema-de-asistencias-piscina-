@@ -5,32 +5,36 @@ from datetime import datetime, timedelta, date
 from streamlit_option_menu import option_menu
 
 # ==========================================
-# 0. CONFIGURACIÓN
+# 0. CONFIGURACIÓN GENERAL
 # ==========================================
-st.set_page_config(page_title="Sistema Piscina - V13", layout="wide", page_icon="🏊")
-DB_NAME = "piscina_v13_final.db"
+st.set_page_config(page_title="Piscina Arenas - V14", layout="wide", page_icon="🏊")
+DB_NAME = "piscina_v14_gestion.db"
 
+# Listas de referencia
 DIAS = ["Lunes-Miércoles-Viernes", "Martes-Jueves-Sábado"]
 HORAS = ["07:00-08:00", "08:00-09:00", "09:00-10:00", "10:00-11:00", 
          "11:00-12:00", "12:00-13:00", "15:00-16:00", "16:00-17:00", 
          "17:00-18:00", "18:00-19:00"]
 NIVELES = ["Básico 0", "Básico 1", "Básico 2", "Intermedio", "Avanzado"]
 
+# Estilos CSS
 st.markdown("""
 <style>
     div.stButton > button {width: 100%; font-weight: bold;}
-    .success-msg {padding: 10px; background-color: #d4edda; color: #155724; border-radius: 5px;}
-    .info-box {padding: 15px; background-color: #e2e3e5; border-radius: 10px; margin-bottom: 10px;}
+    .success-box {padding: 10px; background-color: #d4edda; color: #155724; border-radius: 5px; margin-bottom:10px;}
+    .warning-box {padding: 10px; background-color: #fff3cd; color: #856404; border-radius: 5px; margin-bottom:10px;}
+    .error-box {padding: 10px; background-color: #f8d7da; color: #721c24; border-radius: 5px; margin-bottom:10px;}
+    .recup-box {border: 2px solid #28a745; padding: 10px; border-radius: 5px; margin-top: 20px;}
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. BASE DE DATOS
+# 1. GESTIÓN DE BASE DE DATOS
 # ==========================================
 def run_query(query, params=(), return_data=False):
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
-        c.execute("PRAGMA foreign_keys = ON;")
+        c.execute("PRAGMA foreign_keys = ON;") # Activar llaves foráneas
         try:
             c.execute(query, params)
             if return_data: return c.fetchall()
@@ -41,12 +45,29 @@ def run_query(query, params=(), return_data=False):
             return False
 
 def init_db():
+    # Tablas Base
     run_query('''CREATE TABLE IF NOT EXISTS ciclos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT, fecha_inicio DATE)''')
     run_query('''CREATE TABLE IF NOT EXISTS horarios (id INTEGER PRIMARY KEY AUTOINCREMENT, ciclo_id INTEGER, grupo TEXT, hora_inicio TEXT, nivel_salon TEXT, capacidad INTEGER, FOREIGN KEY(ciclo_id) REFERENCES ciclos(id))''')
     run_query('''CREATE TABLE IF NOT EXISTS alumnos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT, apellido TEXT, telefono TEXT, direccion TEXT, nivel TEXT, apoderado TEXT, condicion TEXT)''')
     run_query('''CREATE TABLE IF NOT EXISTS matriculas (id INTEGER PRIMARY KEY AUTOINCREMENT, alumno_id INTEGER, horario_id INTEGER, fecha_registro DATE, FOREIGN KEY(alumno_id) REFERENCES alumnos(id), FOREIGN KEY(horario_id) REFERENCES horarios(id))''')
     run_query('''CREATE TABLE IF NOT EXISTS asistencia (id INTEGER PRIMARY KEY AUTOINCREMENT, alumno_id INTEGER, horario_id INTEGER, fecha TEXT, estado TEXT, UNIQUE(alumno_id, horario_id, fecha))''')
-    run_query('''CREATE TABLE IF NOT EXISTS recuperaciones (id INTEGER PRIMARY KEY AUTOINCREMENT, alumno_id INTEGER, fecha_origen TEXT, horario_destino_id INTEGER, fecha_destino TEXT, asistio BOOLEAN DEFAULT 0)''')
+    
+    # Tabla Recuperaciones (Visitantes)
+    run_query('''CREATE TABLE IF NOT EXISTS recuperaciones (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                 alumno_id INTEGER, 
+                 fecha_origen TEXT, 
+                 horario_destino_id INTEGER, 
+                 fecha_destino TEXT, 
+                 asistio BOOLEAN DEFAULT 0)''')
+                 
+    # NUEVA TABLA: INCIDENTES
+    run_query('''CREATE TABLE IF NOT EXISTS incidentes (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                 alumno_id INTEGER, 
+                 fecha DATE, 
+                 detalle TEXT, 
+                 gravedad TEXT)''')
 
 def generar_fechas_clase(fecha_inicio_str, grupo):
     fechas = []
@@ -62,34 +83,31 @@ def generar_fechas_clase(fecha_inicio_str, grupo):
         curr += timedelta(days=1)
     return fechas
 
-def guardar_alumno_y_matricula(nombre, apellido, tel, dire, nivel, apo, cond, horario_id):
-    try:
-        with sqlite3.connect(DB_NAME) as conn:
-            c = conn.cursor()
-            c.execute("PRAGMA foreign_keys = ON;")
-            c.execute("INSERT INTO alumnos (nombre, apellido, telefono, direccion, nivel, apoderado, condicion) VALUES (?, ?, ?, ?, ?, ?, ?)", (nombre, apellido, tel, dire, nivel, apo, cond))
-            alumno_id = c.lastrowid
-            c.execute("INSERT INTO matriculas (alumno_id, horario_id, fecha_registro) VALUES (?, ?, ?)", (alumno_id, horario_id, date.today()))
-            conn.commit()
-            return True, alumno_id
-    except Exception as e: return False, str(e)
+# Función segura para borrar alumno y todo su rastro
+def eliminar_alumno_total(aid):
+    run_query("DELETE FROM asistencia WHERE alumno_id=?", (aid,))
+    run_query("DELETE FROM matriculas WHERE alumno_id=?", (aid,))
+    run_query("DELETE FROM recuperaciones WHERE alumno_id=?", (aid,))
+    run_query("DELETE FROM incidentes WHERE alumno_id=?", (aid,))
+    run_query("DELETE FROM alumnos WHERE id=?", (aid,))
+    return True
 
 init_db()
 
 # ==========================================
-# 2. INTERFAZ LATERAL
+# 2. MENÚ PRINCIPAL
 # ==========================================
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2972/2972199.png", width=80)
     selected = option_menu(
         menu_title="Menú",
-        options=["Configuración", "Matrícula", "👨‍🎓 Estudiantes", "Asistencia", "🔄 Recuperaciones"],
-        icons=["gear", "person-plus", "people", "calendar-check", "arrow-repeat"],
+        options=["Configuración", "Matrícula", "👨‍🎓 Estudiantes", "Asistencia", "🔄 Recuperaciones", "⛑️ Incidentes"],
+        icons=["gear", "person-plus", "people", "calendar-check", "arrow-repeat", "bandaid"],
         default_index=0,
     )
 
 # ---------------------------------------------------------
-# MÓDULO CONFIGURACIÓN
+# MÓDULO 1: CONFIGURACIÓN
 # ---------------------------------------------------------
 if selected == "Configuración":
     st.title("⚙️ Configuración")
@@ -117,17 +135,31 @@ if selected == "Configuración":
                     st.success("Salón Creado.")
                 else: st.error("Ya existe.")
             st.write("---")
-            df = pd.read_sql_query(f"SELECT grupo, hora_inicio, nivel_salon, capacidad FROM horarios WHERE ciclo_id={opts[sc]} ORDER BY hora_inicio", sqlite3.connect(DB_NAME))
-            st.dataframe(df, hide_index=True)
+            # Opción para borrar salones vacíos
+            st.subheader("Listado de Salones")
+            salones_df = run_query(f"SELECT id, grupo, hora_inicio, nivel_salon, capacidad FROM horarios WHERE ciclo_id={opts[sc]} ORDER BY hora_inicio", return_data=True)
+            if salones_df:
+                for s in salones_df:
+                    sid, sgr, sho, sni, sca = s
+                    c_del1, c_del2 = st.columns([4, 1])
+                    c_del1.text(f"{sgr} | {sho} | {sni}")
+                    if c_del2.button("🗑️", key=f"del_sal_{sid}"):
+                        # Verificar si tiene matriculas
+                        cnt = run_query("SELECT COUNT(*) FROM matriculas WHERE horario_id=?", (sid,), return_data=True)[0][0]
+                        if cnt == 0:
+                            run_query("DELETE FROM horarios WHERE id=?", (sid,))
+                            st.rerun()
+                        else:
+                            st.error("No puedes borrar: tiene alumnos.")
+        else: st.warning("Crea un ciclo primero.")
 
 # ---------------------------------------------------------
-# MÓDULO MATRÍCULA (INCLUYE RE-MATRÍCULA)
+# MÓDULO 2: MATRÍCULA
 # ---------------------------------------------------------
 elif selected == "Matrícula":
-    st.title("📝 Gestión de Matrículas")
-    tab1, tab2 = st.tabs(["🆕 Nuevo Alumno", "🔄 Re-matrícula (Antiguos)"])
+    st.title("📝 Matrícula")
+    tab1, tab2 = st.tabs(["🆕 Nuevo Alumno", "🔄 Re-matrícula"])
     
-    # NUEVO ALUMNO
     with tab1:
         ciclos = run_query("SELECT id, nombre FROM ciclos ORDER BY id DESC", return_data=True)
         if not ciclos: st.warning("Crea un ciclo."); st.stop()
@@ -152,7 +184,7 @@ elif selected == "Matrícula":
             hid_sel = ops[stx]
             
             if hid_sel:
-                st.info(f"Salón Seleccionado ID: {hid_sel}")
+                st.success(f"Salón ID: {hid_sel}")
                 with st.form("fm_new"):
                     ca, cb = st.columns(2)
                     nm = ca.text_input("Nombre")
@@ -160,105 +192,105 @@ elif selected == "Matrícula":
                     tl = ca.text_input("Teléfono")
                     pod = cb.text_input("Apoderado")
                     dr = st.text_input("Dirección")
-                    cn = st.text_area("Condición")
+                    cn = st.text_area("Condición Médica/Especial")
                     if st.form_submit_button("Matricular"):
                         if nm and ap:
-                            ok, res = guardar_alumno_y_matricula(nm, ap, tl, dr, "Registrado", pod, cn, hid_sel)
-                            if ok: st.success(f"Matriculado. ID: {res}")
-                            else: st.error(res)
+                            run_query("INSERT INTO alumnos (nombre, apellido, telefono, direccion, nivel, apoderado, condicion) VALUES (?, ?, ?, ?, ?, ?, ?)", (nm, ap, tl, dr, "Registrado", pod, cn))
+                            aid = run_query("SELECT last_insert_rowid()", return_data=True)[0][0]
+                            run_query("INSERT INTO matriculas (alumno_id, horario_id, fecha_registro) VALUES (?, ?, ?)", (aid, hid_sel, date.today()))
+                            st.balloons()
+                            st.success(f"Matriculado. ID: {aid}")
                         else: st.error("Faltan datos.")
-        else: st.warning("No hay salones en este horario.")
+        else: st.warning("No hay salones.")
 
-    # RE-MATRÍCULA
     with tab2:
-        st.info("Usa esto para alumnos que ya existen en el sistema.")
-        busq = st.text_input("Buscar Alumno por Nombre:")
+        st.info("Re-inscribir alumno antiguo en nuevo ciclo.")
+        busq = st.text_input("Buscar Alumno:")
         if busq:
             res = run_query(f"SELECT id, nombre, apellido, nivel FROM alumnos WHERE nombre LIKE '%{busq}%' OR apellido LIKE '%{busq}%'", return_data=True)
             if res:
-                dic_al = {f"{r[1]} {r[2]} (Nivel: {r[3]})": r[0] for r in res}
-                sel_al = st.selectbox("Seleccionar Alumno:", list(dic_al.keys()))
+                dic_al = {f"{r[1]} {r[2]} ({r[3]})": r[0] for r in res}
+                sel_al = st.selectbox("Alumno:", list(dic_al.keys()))
                 id_alum = dic_al[sel_al]
                 
-                st.write("---")
-                st.write("**Seleccionar Nuevo Horario:**")
-                # Reutilizamos lógica de selección
+                # Selector simplificado
                 dc2 = {n: i for i, n in ciclos}
-                sc2 = st.selectbox("Nuevo Ciclo:", list(dc2.keys()), key="rm_c")
+                sc2 = st.selectbox("Ciclo Destino:", list(dc2.keys()), key="rm_c")
                 c1, c2 = st.columns(2)
                 sd2 = c1.radio("Días:", DIAS, key="rm_d")
                 sh2 = c2.selectbox("Hora:", HORAS, key="rm_h")
                 
-                salones2 = run_query("SELECT id, nivel_salon, capacidad FROM horarios WHERE ciclo_id=? AND grupo=? AND hora_inicio=?", (dc2[sc2], sd2, sh2), return_data=True)
+                salones2 = run_query("SELECT id, nivel_salon FROM horarios WHERE ciclo_id=? AND grupo=? AND hora_inicio=?", (dc2[sc2], sd2, sh2), return_data=True)
                 if salones2:
-                    ops2 = {}
-                    for s in salones2:
-                        hid, niv, cap = s
-                        oc = run_query("SELECT COUNT(*) FROM matriculas WHERE horario_id=?", (hid,), return_data=True)[0][0]
-                        lbl = f"{niv} ({cap-oc}/{cap} libres)"
-                        if oc < cap: ops2[lbl] = hid
-                        else: ops2[f"⛔ LLENO - {lbl}"] = None
-                    
-                    stx2 = st.selectbox("Salón Destino:", list(ops2.keys()), key="rm_s")
+                    ops2 = {f"{s[1]}": s[0] for s in salones2}
+                    stx2 = st.selectbox("Salón:", list(ops2.keys()), key="rm_s")
                     if st.button("Confirmar Re-matrícula"):
-                        if ops2[stx2]:
-                            run_query("INSERT INTO matriculas (alumno_id, horario_id, fecha_registro) VALUES (?, ?, ?)", (id_alum, ops2[stx2], date.today()))
-                            st.balloons()
-                            st.success("Re-matriculado exitosamente.")
-                else: st.warning("No hay salones disponibles.")
+                        run_query("INSERT INTO matriculas (alumno_id, horario_id, fecha_registro) VALUES (?, ?, ?)", (id_alum, ops2[stx2], date.today()))
+                        st.success("Re-matriculado.")
+                else: st.warning("No hay salón.")
 
 # ---------------------------------------------------------
-# MÓDULO ESTUDIANTES (EDICIÓN Y CONTACTO)
+# MÓDULO 3: ESTUDIANTES (FICHA COMPLETA + BORRAR)
 # ---------------------------------------------------------
 elif selected == "👨‍🎓 Estudiantes":
-    st.title("👨‍🎓 Directorio de Estudiantes")
-    st.markdown("Busca alumnos para ver su información de contacto o editar sus datos.")
+    st.title("👨‍🎓 Gestión de Estudiantes")
+    st.markdown("Busca para ver ficha completa, editar o eliminar.")
     
-    search = st.text_input("🔍 Buscar por Nombre o Apellido:")
-    
+    search = st.text_input("🔍 Nombre o Apellido:")
     if search:
         alumnos = run_query(f"SELECT * FROM alumnos WHERE nombre LIKE '%{search}%' OR apellido LIKE '%{search}%'", return_data=True)
-        
         if alumnos:
             for alum in alumnos:
-                # alum: id, nombre, apellido, tel, dir, nivel, apo, cond
                 aid, nom, ape, tel, dire, niv, apo, cond = alum
                 
-                with st.expander(f"👤 {nom} {ape} (Apoderado: {apo})"):
-                    # Modo visualización
-                    c1, c2 = st.columns(2)
-                    c1.markdown(f"📞 **Teléfono:** {tel}")
-                    c2.markdown(f"🏠 **Dirección:** {dire}")
-                    if cond: st.error(f"⚠️ Condición: {cond}")
-                    
-                    # Modo Edición
+                # TARJETA DEL ESTUDIANTE
+                with st.expander(f"👤 {nom} {ape} | {niv}", expanded=True):
+                    col_info1, col_info2 = st.columns(2)
+                    with col_info1:
+                        st.markdown(f"**📞 Teléfono:** {tel}")
+                        st.markdown(f"**🏠 Dirección:** {dire}")
+                    with col_info2:
+                        st.markdown(f"**🛡️ Apoderado:** {apo}")
+                        if cond: st.error(f"⚠️ **CONDICIÓN:** {cond}")
+                        else: st.success("Salud: Sin condiciones reportadas")
+
                     st.write("---")
-                    st.caption("✏️ Editar Datos")
-                    with st.form(f"edit_{aid}"):
-                        new_tel = st.text_input("Teléfono", value=tel)
-                        new_apo = st.text_input("Apoderado", value=apo)
-                        new_dir = st.text_input("Dirección", value=dire)
-                        new_cond = st.text_area("Condición", value=cond)
-                        
-                        if st.form_submit_button("Guardar Cambios"):
-                            run_query("UPDATE alumnos SET telefono=?, apoderado=?, direccion=?, condicion=? WHERE id=?", 
-                                      (new_tel, new_apo, new_dir, new_cond, aid))
-                            st.success("Datos actualizados. Recarga para ver cambios.")
-                            st.rerun()
-        else:
-            st.info("No se encontraron alumnos.")
-    else:
-        # Mostrar los ultimos 5 registrados
-        st.caption("Últimos alumnos registrados:")
-        recent = run_query("SELECT nombre, apellido, nivel FROM alumnos ORDER BY id DESC LIMIT 5", return_data=True)
-        df = pd.DataFrame(recent, columns=["Nombre", "Apellido", "Nivel"])
-        st.table(df)
+                    
+                    # PESTAÑAS DENTRO DE LA TARJETA
+                    tb_edit, tb_del = st.tabs(["✏️ Editar Datos", "🗑️ Eliminar"])
+                    
+                    with tb_edit:
+                        with st.form(f"ed_{aid}"):
+                            nt = st.text_input("Teléfono", value=tel)
+                            nd = st.text_input("Dirección", value=dire)
+                            na = st.text_input("Apoderado", value=apo)
+                            nc = st.text_area("Condición", value=cond)
+                            if st.form_submit_button("Guardar Cambios"):
+                                run_query("UPDATE alumnos SET telefono=?, direccion=?, apoderado=?, condicion=? WHERE id=?", (nt, nd, na, nc, aid))
+                                st.success("Actualizado.")
+                                st.rerun()
+
+                    with tb_del:
+                        st.markdown("""
+                        <div class="error-box">
+                        <b>ZONA DE PELIGRO:</b> Esto borrará al alumno, sus asistencias y matrículas. No se puede deshacer.
+                        </div>
+                        """, unsafe_allow_html=True)
+                        clave = st.text_input("Escribe 'borrar' para confirmar:", key=f"pass_{aid}")
+                        if st.button("CONFIRMAR ELIMINACIÓN", key=f"btn_del_{aid}"):
+                            if clave == "borrar":
+                                eliminar_alumno_total(aid)
+                                st.success("Alumno eliminado.")
+                                st.rerun()
+                            else:
+                                st.error("Palabra clave incorrecta.")
+        else: st.info("No encontrado.")
 
 # ---------------------------------------------------------
-# MÓDULO ASISTENCIA
+# MÓDULO 4: ASISTENCIA (CORREGIDO VISITANTES)
 # ---------------------------------------------------------
 elif selected == "Asistencia":
-    st.title("📅 Toma de Asistencia")
+    st.title("📅 Asistencia y Visitantes")
     ciclos = run_query("SELECT id, nombre, fecha_inicio FROM ciclos", return_data=True)
     if not ciclos: st.stop()
     dc = {n: (i, f) for i, n, f in ciclos}
@@ -277,7 +309,8 @@ elif selected == "Asistencia":
         
         st.divider()
         
-        # TABLA PRINCIPAL
+        # 1. TABLA REGULARES
+        st.subheader("📋 Alumnos Matriculados")
         al_reg = run_query("SELECT a.id, a.nombre, a.apellido, a.condicion FROM alumnos a JOIN matriculas m ON a.id = m.alumno_id WHERE m.horario_id = ?", (hid,), return_data=True)
         fechas = generar_fechas_clase(cfecha, sd)
         
@@ -296,10 +329,9 @@ elif selected == "Asistencia":
             cfg = {"ID": None, "Alumno": st.column_config.TextColumn(disabled=True, width="medium")}
             for f in fechas: cfg[f] = st.column_config.SelectboxColumn(f[5:], options=["✅", "❌", "🤧"], width="small", required=False)
             
-            st.info("Leyenda: ✅ Presente | ❌ Falta | 🤧 Justificado (Pasa a lista de recuperación)")
             edited = st.data_editor(df, column_config=cfg, hide_index=True)
             
-            if st.button("Guardar Asistencia"):
+            if st.button("Guardar Asistencia Regulares"):
                 conn = sqlite3.connect(DB_NAME)
                 c = conn.cursor()
                 for i, r in edited.iterrows():
@@ -311,14 +343,16 @@ elif selected == "Asistencia":
                 conn.commit()
                 conn.close()
                 st.success("Guardado.")
-        else: st.warning("Salón vacío.")
+        else: st.warning("Salón sin alumnos matriculados.")
         
-        # --- VISITANTES / RECUPERACIONES ---
-        st.write("---")
-        st.subheader("🗓️ Alumnos Recuperando Hoy")
-        # Busca alumnos que tengan programada una recuperacion en este salon (hid) y la fecha de destino coincida con alguna de las fechas del ciclo o sean futuras
+        # 2. SECCIÓN VISITANTES (RECUPERACIONES) - CORREGIDO
+        st.markdown("""<div class="recup-box">""", unsafe_allow_html=True)
+        st.subheader("🟢 Alumnos Visitantes (Recuperación)")
+        st.markdown("Alumnos de otros horarios que vienen a recuperar clase HOY o en estas fechas.")
+        
+        # Busca recuperaciones asignadas a ESTE horario (hid)
         visitantes = run_query("""
-            SELECT r.fecha_destino, a.nombre, a.apellido, r.fecha_origen
+            SELECT r.id, r.fecha_destino, a.nombre, a.apellido, r.asistio
             FROM recuperaciones r
             JOIN alumnos a ON r.alumno_id = a.id
             WHERE r.horario_destino_id = ?
@@ -326,64 +360,138 @@ elif selected == "Asistencia":
         """, (hid,), return_data=True)
         
         if visitantes:
-            st.table(pd.DataFrame(visitantes, columns=["Fecha Recuperación", "Nombre", "Apellido", "Faltó el día"]))
+            # Mostramos una tabla simple para marcar su asistencia
+            vis_data = []
+            for v in visitantes:
+                rid, f_dest, nom, ape, asistio = v
+                vis_data.append({
+                    "RID": rid,
+                    "Fecha": f_dest,
+                    "Alumno": f"{nom} {ape}",
+                    "Asistió": True if asistio else False
+                })
+            
+            df_vis = pd.DataFrame(vis_data)
+            edited_vis = st.data_editor(df_vis, column_config={
+                "RID": None,
+                "Asistió": st.column_config.CheckboxColumn("¿Vino?", default=False)
+            }, hide_index=True, key="editor_visitantes")
+            
+            if st.button("Confirmar Asistencia Visitantes"):
+                conn = sqlite3.connect(DB_NAME)
+                c = conn.cursor()
+                for i, r in edited_vis.iterrows():
+                    # Actualizar tabla recuperaciones
+                    c.execute("UPDATE recuperaciones SET asistio=? WHERE id=?", (1 if r["Asistió"] else 0, r["RID"]))
+                conn.commit()
+                conn.close()
+                st.success("Visitantes actualizados.")
         else:
-            st.caption("No hay recuperaciones programadas para este salón.")
+            st.info("No hay alumnos recuperando clase en este salón.")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# MÓDULO RECUPERACIONES
+# MÓDULO 5: RECUPERACIONES
 # ---------------------------------------------------------
 elif selected == "🔄 Recuperaciones":
-    st.title("Gestión de Justificaciones y Recuperaciones")
+    st.title("Gestión de Justificaciones")
     
-    col_a, col_b = st.columns(2)
+    # Pendientes
+    st.subheader("1. Faltas Justificadas (Pendientes de Agendar)")
+    pendientes = run_query("""
+        SELECT asis.alumno_id, a.nombre, a.apellido, asis.fecha, h.grupo, a.nivel
+        FROM asistencia asis
+        JOIN alumnos a ON asis.alumno_id = a.id
+        JOIN horarios h ON asis.horario_id = h.id
+        WHERE asis.estado = 'Justificado'
+        AND NOT EXISTS (SELECT 1 FROM recuperaciones r WHERE r.alumno_id = asis.alumno_id AND r.fecha_origen = asis.fecha)
+    """, return_data=True)
     
-    with col_a:
-        st.subheader("1. Pendientes de Programar")
-        # Busca Justificados que NO estan en tabla recuperaciones
-        pendientes = run_query("""
-            SELECT asis.alumno_id, a.nombre, a.apellido, asis.fecha, h.hora_inicio, a.nivel
-            FROM asistencia asis
-            JOIN alumnos a ON asis.alumno_id = a.id
-            JOIN horarios h ON asis.horario_id = h.id
-            WHERE asis.estado = 'Justificado'
-            AND NOT EXISTS (SELECT 1 FROM recuperaciones r WHERE r.alumno_id = asis.alumno_id AND r.fecha_origen = asis.fecha)
-        """, return_data=True)
-        
-        if pendientes:
-            for p in pendientes:
-                aid, nom, ape, f_falta, hora, niv = p
-                with st.expander(f"🤧 {nom} {ape} ({f_falta})"):
-                    st.write(f"Nivel: {niv} | Hora Habitual: {hora}")
-                    with st.form(f"rec_{aid}_{f_falta}"):
-                        f_new = st.date_input("Fecha Recuperación", min_value=date.today())
-                        # Buscar salones compatibles
-                        h_dest = run_query(f"SELECT h.id, h.grupo, h.hora_inicio, h.nivel_salon, c.nombre FROM horarios h JOIN ciclos c ON h.ciclo_id = c.id WHERE h.nivel_salon = '{niv}'", return_data=True)
-                        if not h_dest: h_dest = run_query("SELECT h.id, h.grupo, h.hora_inicio, h.nivel_salon, c.nombre FROM horarios h JOIN ciclos c ON h.ciclo_id = c.id", return_data=True)
-                        
-                        op_h = {f"{h[4]} {h[1]} {h[2]}": h[0] for h in h_dest}
-                        sel_hd = st.selectbox("Salón Destino", list(op_h.keys()))
-                        
-                        if st.form_submit_button("Agendar"):
-                            run_query("INSERT INTO recuperaciones (alumno_id, fecha_origen, horario_destino_id, fecha_destino) VALUES (?,?,?,?)", (aid, f_falta, op_h[sel_hd], str(f_new)))
-                            st.success("Agendado.")
-                            st.rerun()
-        else:
-            st.success("No hay justificaciones pendientes.")
+    if pendientes:
+        for p in pendientes:
+            aid, nom, ape, f_falta, grup, niv = p
+            with st.form(f"rec_{aid}_{f_falta}"):
+                st.markdown(f"**{nom} {ape}** faltó el {f_falta} ({grup})")
+                f_new = st.date_input("Fecha Recuperación", min_value=date.today())
+                
+                # Buscar salones compatibles
+                h_dest = run_query(f"SELECT h.id, h.grupo, h.hora_inicio, h.nivel_salon, c.nombre FROM horarios h JOIN ciclos c ON h.ciclo_id = c.id WHERE h.nivel_salon = '{niv}'", return_data=True)
+                if not h_dest: h_dest = run_query("SELECT h.id, h.grupo, h.hora_inicio, h.nivel_salon, c.nombre FROM horarios h JOIN ciclos c ON h.ciclo_id = c.id", return_data=True)
+                
+                op_h = {f"{h[4]} | {h[1]} {h[2]} ({h[3]})": h[0] for h in h_dest}
+                sel_hd = st.selectbox("Salón Destino", list(op_h.keys()))
+                
+                if st.form_submit_button("Agendar"):
+                    run_query("INSERT INTO recuperaciones (alumno_id, fecha_origen, horario_destino_id, fecha_destino) VALUES (?,?,?,?)", (aid, f_falta, op_h[sel_hd], str(f_new)))
+                    st.success("Agendado.")
+                    st.rerun()
+    else: st.success("No hay pendientes.")
 
-    with col_b:
-        st.subheader("2. Calendario de Recuperaciones")
-        recups = run_query("""
-            SELECT r.fecha_destino, a.nombre, a.apellido, h.hora_inicio, h.nivel_salon
-            FROM recuperaciones r
-            JOIN alumnos a ON r.alumno_id = a.id
-            JOIN horarios h ON r.horario_destino_id = h.id
-            WHERE r.fecha_destino >= ?
-            ORDER BY r.fecha_destino
-        """, (date.today(),), return_data=True)
-        
-        if recups:
-            df_rec = pd.DataFrame(recups, columns=["Fecha", "Alumno", "Apellido", "Hora", "Salón"])
-            st.dataframe(df_rec, hide_index=True)
+    # Lista
+    st.write("---")
+    st.subheader("2. Calendario de Recuperaciones")
+    hist = run_query("""
+        SELECT r.fecha_destino, a.nombre, a.apellido, h.hora_inicio, h.nivel_salon, r.asistio
+        FROM recuperaciones r
+        JOIN alumnos a ON r.alumno_id = a.id
+        JOIN horarios h ON r.horario_destino_id = h.id
+        ORDER BY r.fecha_destino
+    """, return_data=True)
+    if hist:
+        dfh = pd.DataFrame(hist, columns=["Fecha", "Alumno", "Apellido", "Hora", "Salón", "Asistió"])
+        dfh["Asistió"] = dfh["Asistió"].apply(lambda x: "Sí" if x else "Pendiente/No")
+        st.dataframe(dfh)
+
+# ---------------------------------------------------------
+# MÓDULO 6: INCIDENTES (NUEVO)
+# ---------------------------------------------------------
+elif selected == "⛑️ Incidentes":
+    st.title("⛑️ Reporte de Incidentes")
+    st.markdown("Registro de accidentes, caídas o situaciones de emergencia.")
+    
+    col_form, col_hist = st.columns([1, 2])
+    
+    with col_form:
+        st.subheader("Nuevo Reporte")
+        with st.form("form_incidente"):
+            # Buscar alumno
+            nm_inc = st.text_input("Buscar Alumno (Nombre):")
+            alum_sel_id = None
+            if nm_inc:
+                res = run_query(f"SELECT id, nombre, apellido FROM alumnos WHERE nombre LIKE '%{nm_inc}%'", return_data=True)
+                if res:
+                    dic_inc = {f"{r[1]} {r[2]}": r[0] for r in res}
+                    sel_nm = st.selectbox("Seleccionar:", list(dic_inc.keys()))
+                    alum_sel_id = dic_inc[sel_nm]
+            
+            f_inc = st.date_input("Fecha del Incidente")
+            det_inc = st.text_area("Detalles del suceso", placeholder="Ej: El alumno resbaló al borde de la piscina...")
+            grav = st.selectbox("Gravedad", ["Leve", "Moderada", "Grave (Hospital)", "Crítica"])
+            
+            if st.form_submit_button("Registrar Incidente"):
+                if alum_sel_id and det_inc:
+                    run_query("INSERT INTO incidentes (alumno_id, fecha, detalle, gravedad) VALUES (?,?,?,?)", (alum_sel_id, f_inc, det_inc, grav))
+                    st.error("Incidente Registrado.")
+                else:
+                    st.warning("Busca un alumno y escribe detalles.")
+
+    with col_hist:
+        st.subheader("Historial de Incidentes")
+        data_inc = run_query("""
+            SELECT i.fecha, a.nombre, a.apellido, i.gravedad, i.detalle 
+            FROM incidentes i JOIN alumnos a ON i.alumno_id = a.id 
+            ORDER BY i.id DESC
+        """, return_data=True)
+        if data_inc:
+            for row in data_inc:
+                f, n, a, g, d = row
+                color = "orange" if g == "Moderada" else ("red" if "Grave" in g else "green")
+                st.markdown(f"""
+                <div style="border-left: 5px solid {color}; padding: 10px; background: #f9f9f9; margin-bottom: 10px;">
+                    <b>{f} | {n} {a}</b> <span style="color:{color}">({g})</span><br>
+                    {d}
+                </div>
+                """, unsafe_allow_html=True)
         else:
-            st.info("No hay recuperaciones próximas.")
+            st.info("Sin incidentes reportados.")

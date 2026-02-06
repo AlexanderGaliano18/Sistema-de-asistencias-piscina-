@@ -7,8 +7,8 @@ from streamlit_option_menu import option_menu
 # ==========================================
 # 0. CONFIGURACIÓN
 # ==========================================
-st.set_page_config(page_title="Sistema Piscina - V10", layout="wide", page_icon="🏊")
-DB_NAME = "piscina_v10_final.db"
+st.set_page_config(page_title="Sistema Piscina - V11", layout="wide", page_icon="🏊")
+DB_NAME = "piscina_v11_fixed.db"
 
 # Listas Estándar
 DIAS = ["Lunes-Miércoles-Viernes", "Martes-Jueves-Sábado"]
@@ -32,7 +32,6 @@ st.markdown("""
 def run_query(query, params=(), return_data=False):
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
-        # Activar Foreign Keys para asegurar que las tablas se unan
         c.execute("PRAGMA foreign_keys = ON;")
         try:
             c.execute(query, params)
@@ -62,7 +61,6 @@ def init_db():
                  direccion TEXT, nivel TEXT, apoderado TEXT, 
                  condicion TEXT)''')
     
-    # Esta tabla es el PUENTE. Si falla aquí, no se ven los alumnos.
     run_query('''CREATE TABLE IF NOT EXISTS matriculas (
                  id INTEGER PRIMARY KEY AUTOINCREMENT, 
                  alumno_id INTEGER, 
@@ -76,6 +74,33 @@ def init_db():
                  alumno_id INTEGER, horario_id INTEGER, 
                  fecha TEXT, estado TEXT, 
                  UNIQUE(alumno_id, horario_id, fecha))''')
+
+# --- FUNCIÓN ESPECIAL TRANSACCIONAL (SOLUCIONA EL ERROR DE ID 0) ---
+def guardar_alumno_y_matricula(nombre, apellido, tel, dire, nivel, apo, cond, horario_id):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            c.execute("PRAGMA foreign_keys = ON;")
+            
+            # 1. Insertar Alumno
+            c.execute("""
+                INSERT INTO alumnos (nombre, apellido, telefono, direccion, nivel, apoderado, condicion) 
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (nombre, apellido, tel, dire, nivel, apo, cond))
+            
+            # 2. Capturar el ID (Dentro de la misma conexión, ahora sí funciona)
+            alumno_id = c.lastrowid
+            
+            # 3. Insertar Matrícula
+            c.execute("""
+                INSERT INTO matriculas (alumno_id, horario_id, fecha_registro) 
+                VALUES (?, ?, ?)
+            """, (alumno_id, horario_id, date.today()))
+            
+            conn.commit()
+            return True, alumno_id
+    except Exception as e:
+        return False, str(e)
 
 init_db()
 
@@ -92,11 +117,10 @@ with st.sidebar:
     )
 
 # ---------------------------------------------------------
-# MÓDULO 1: CONFIGURACIÓN (CREAR CICLOS Y SALONES)
+# MÓDULO 1: CONFIGURACIÓN
 # ---------------------------------------------------------
 if selected == "Configuración":
     st.title("⚙️ Configuración")
-    
     tab1, tab2 = st.tabs(["1. Crear Ciclo", "2. Abrir Salones"])
     
     with tab1:
@@ -107,7 +131,6 @@ if selected == "Configuración":
             st.success("Ciclo creado.")
             
     with tab2:
-        st.info("Crea los salones donde se matricularán los niños.")
         ciclos = run_query("SELECT id, nombre FROM ciclos ORDER BY id DESC", return_data=True)
         if ciclos:
             opts = {n: i for i, n in ciclos}
@@ -120,7 +143,6 @@ if selected == "Configuración":
             cap = st.number_input("Cupos", 10)
             
             if st.button("Crear Salón"):
-                # Verificar si ya existe
                 dup = run_query("SELECT id FROM horarios WHERE ciclo_id=? AND grupo=? AND hora_inicio=? AND nivel_salon=?", 
                                 (opts[sel_c], dia, hora, niv), return_data=True)
                 if not dup:
@@ -130,9 +152,7 @@ if selected == "Configuración":
                 else:
                     st.error("Ya existe un salón con esas características.")
             
-            # Ver salones
             st.write("---")
-            st.write(f"Salones en **{sel_c}**:")
             data = run_query(f"SELECT id, grupo, hora_inicio, nivel_salon, capacidad FROM horarios WHERE ciclo_id={opts[sel_c]} ORDER BY hora_inicio", return_data=True)
             if data:
                 df = pd.DataFrame(data, columns=["ID", "Días", "Hora", "Nivel", "Cupos"])
@@ -141,14 +161,12 @@ if selected == "Configuración":
             st.warning("No hay ciclos creados.")
 
 # ---------------------------------------------------------
-# MÓDULO 2: MATRÍCULA (EL PROBLEMA ESTABA AQUÍ)
+# MÓDULO 2: MATRÍCULA (AQUÍ ESTÁ EL ARREGLO)
 # ---------------------------------------------------------
 elif selected == "Matrícula":
-    st.title("📝 Matrícula - Paso a Paso")
+    st.title("📝 Matrícula")
     
-    # 1. BUSCAR EL SALÓN PRIMERO
     st.subheader("1. Selecciona el Horario")
-    
     ciclos = run_query("SELECT id, nombre FROM ciclos ORDER BY id DESC", return_data=True)
     if not ciclos:
         st.warning("Falta configurar ciclos.")
@@ -161,8 +179,6 @@ elif selected == "Matrícula":
     sel_dia = c1.radio("Días:", DIAS)
     sel_hora = c2.selectbox("Hora Preferida:", HORAS)
     
-    # BUSCAR SALONES DISPONIBLES EN ESA HORA
-    # Traemos ID, Nivel y Capacidad
     salones = run_query("""
         SELECT id, nivel_salon, capacidad 
         FROM horarios 
@@ -173,14 +189,12 @@ elif selected == "Matrícula":
     
     if not salones:
         st.error(f"❌ No existe ningún salón configurado para {sel_dia} a las {sel_hora}.")
-        st.info("Ve a Configuración -> Abrir Salones y crea uno primero.")
     else:
         opciones = {}
         for s in salones:
             hid, sniv, scap = s
-            # Contar ocupados
             ocup = run_query("SELECT COUNT(*) FROM matriculas WHERE horario_id=?", (hid,), return_data=True)[0][0]
-            label = f"Salón: {sniv} | Cupos: {scap - ocup}/{scap} | (ID Interno: {hid})"
+            label = f"Salón: {sniv} | Cupos: {scap - ocup}/{scap}"
             if ocup < scap:
                 opciones[label] = hid
             else:
@@ -190,7 +204,7 @@ elif selected == "Matrícula":
         id_horario_seleccionado = opciones[sel_texto]
         
         if id_horario_seleccionado:
-            st.success(f"🔗 **Conectado al Salón ID: {id_horario_seleccionado}**. El alumno se guardará aquí.")
+            st.success(f"🔗 Conectado al Salón ID: {id_horario_seleccionado}")
             
             st.write("---")
             st.subheader("2. Datos del Alumno")
@@ -201,42 +215,38 @@ elif selected == "Matrícula":
                 ape = col_b.text_input("Apellido")
                 tel = col_a.text_input("Teléfono")
                 apo = col_b.text_input("Apoderado")
+                dire = col_a.text_input("Dirección")
                 cond = st.text_area("Condición Médica")
                 
                 # Botón de Guardado
                 btn_guardar = st.form_submit_button("💾 CONFIRMAR MATRÍCULA")
                 
                 if btn_guardar:
-                    if nom and ape:
-                        # 1. Guardar Alumno
-                        run_query("INSERT INTO alumnos (nombre, apellido, telefono, nivel, apoderado, condicion) VALUES (?,?,?,?,?,?)",
-                                  (nom, ape, tel, "Registrado", apo, cond))
+                    if nom and ape and id_horario_seleccionado:
+                        # USAMOS LA NUEVA FUNCIÓN TRANSACCIONAL
+                        exito, resultado = guardar_alumno_y_matricula(
+                            nom, ape, tel, dire, "Registrado", apo, cond, id_horario_seleccionado
+                        )
                         
-                        # Recuperar el ID del alumno recién creado
-                        id_alumno = run_query("SELECT last_insert_rowid()", return_data=True)[0][0]
-                        
-                        # 2. Guardar Matrícula (EL ENLACE)
-                        # Aquí usamos el id_horario_seleccionado que confirmamos arriba
-                        run_query("INSERT INTO matriculas (alumno_id, horario_id, fecha_registro) VALUES (?,?,?)",
-                                  (id_alumno, id_horario_seleccionado, date.today()))
-                        
-                        st.balloons()
-                        st.markdown(f"""
-                        <div class="success-msg">
-                            ✅ <b>ÉXITO:</b> Alumno {nom} {ape} matriculado.<br>
-                            🔗 ID Alumno: {id_alumno}<br>
-                            🔗 ID Horario: {id_horario_seleccionado}<br>
-                            Puedes verificarlo en la pestaña 'Base de Datos'.
-                        </div>
-                        """, unsafe_allow_html=True)
+                        if exito:
+                            st.balloons()
+                            st.markdown(f"""
+                            <div class="success-msg">
+                                ✅ <b>ÉXITO TOTAL:</b> Alumno {nom} {ape} matriculado.<br>
+                                🔗 ID Alumno Generado: {resultado}<br>
+                                Verifica en la pestaña 'Asistencia'.
+                            </div>
+                            """, unsafe_allow_html=True)
+                        else:
+                            st.error(f"Error al guardar: {resultado}")
                     else:
-                        st.error("Falta nombre o apellido.")
+                        st.error("Faltan datos obligatorios.")
 
 # ---------------------------------------------------------
-# MÓDULO 3: ASISTENCIA (VERIFICACIÓN)
+# MÓDULO 3: ASISTENCIA
 # ---------------------------------------------------------
 elif selected == "Asistencia":
-    st.title("📅 Toma de Asistencia")
+    st.title("📅 Asistencia")
     
     ciclos = run_query("SELECT id, nombre FROM ciclos", return_data=True)
     if not ciclos: st.stop()
@@ -248,21 +258,16 @@ elif selected == "Asistencia":
     dia = c1.selectbox("Día", DIAS)
     hora = c2.selectbox("Hora", HORAS)
     
-    # Buscar NIVELES en esa hora
     nivs = run_query("SELECT id, nivel_salon FROM horarios WHERE ciclo_id=? AND grupo=? AND hora_inicio=?", 
                      (opts[sel_c], dia, hora), return_data=True)
     
     if nivs:
         d_niv = {n: i for i, n in nivs}
         sel_n = c3.selectbox("Salón:", list(d_niv.keys()))
-        
-        # ID FINAL DEL HORARIO
         id_h_final = d_niv[sel_n]
         
         st.divider()
-        st.write(f"Buscando alumnos en Horario ID: **{id_h_final}**...")
         
-        # CONSULTA DIRECTA
         alumnos = run_query("""
             SELECT a.id, a.nombre, a.apellido, a.condicion
             FROM alumnos a
@@ -271,52 +276,57 @@ elif selected == "Asistencia":
         """, (id_h_final,), return_data=True)
         
         if alumnos:
-            # Lógica de fechas
             fechas = []
-            d = date.today() # Simulación de fechas
-            for i in range(5): fechas.append(str(d + timedelta(days=i)))
+            d = date.today()
+            for i in range(12): fechas.append(str(d + timedelta(days=i))) # Fechas simuladas
             
-            # Tabla
+            # Buscar asistencia guardada
+            asist_data = run_query("SELECT alumno_id, fecha, estado FROM asistencia WHERE horario_id=?", (id_h_final,), return_data=True)
+            mapa_asist = {(row[0], row[1]): row[2] for row in asist_data}
+
             data = []
             for al in alumnos:
-                row = {"ID": al[0], "Alumno": f"{al[1]} {al[2]}"}
+                aid = al[0]
+                row = {"ID": aid, "Alumno": f"{al[1]} {al[2]}"}
                 if al[3]: row["Alumno"] += " 🔴"
-                for f in fechas: row[f] = False
+                
+                for f in fechas:
+                    estado_guardado = mapa_asist.get((aid, f))
+                    row[f] = True if estado_guardado == "Presente" else False
                 data.append(row)
                 
             df = pd.DataFrame(data)
-            edited = st.data_editor(df, hide_index=True)
+            col_conf = {"ID": None}
+            for f in fechas: col_conf[f] = st.column_config.CheckboxColumn(f, default=False)
             
-            if st.button("Guardar"):
-                st.success("Asistencia Guardada")
+            edited = st.data_editor(df, column_config=col_conf, hide_index=True)
+            
+            if st.button("Guardar Asistencia"):
+                conn = sqlite3.connect(DB_NAME)
+                c = conn.cursor()
+                for i, r in edited.iterrows():
+                    aid = r["ID"]
+                    for f in fechas:
+                        est = "Presente" if r[f] else "Falta"
+                        c.execute("INSERT OR REPLACE INTO asistencia (alumno_id, horario_id, fecha, estado) VALUES (?,?,?,?)",
+                                  (aid, id_h_final, f, est))
+                conn.commit()
+                conn.close()
+                st.success("Guardado.")
         else:
-            st.warning(f"⚠️ El sistema funciona, pero este salón (ID {id_h_final}) está vacío.")
-            st.info("Ve a 'Base de Datos' para ver dónde quedaron los alumnos.")
+            st.warning(f"El salón existe (ID {id_h_final}), pero no tiene alumnos.")
     else:
-        st.error("No existe este salón en la configuración.")
+        st.error("No existe este salón.")
 
 # ---------------------------------------------------------
-# MÓDULO 4: BASE DE DATOS (PARA QUE VEAS SI SE GUARDÓ)
+# MÓDULO 4: BASE DE DATOS
 # ---------------------------------------------------------
 elif selected == "Base de Datos":
-    st.title("📂 Auditoría de Datos")
-    
-    st.subheader("1. Tabla Matriculas (El puente)")
-    st.write("Aquí deben salir las uniones. Si sale vacío, la matrícula falló.")
-    
+    st.title("📂 Datos Crudos")
     df = pd.read_sql_query("""
-        SELECT m.id as ID_MATRICULA, 
-               a.nombre || ' ' || a.apellido as ALUMNO, 
-               h.hora_inicio as HORA, 
-               h.nivel_salon as NIVEL,
-               h.id as ID_HORARIO_REAL
+        SELECT m.id, a.nombre, a.apellido, h.hora_inicio, h.nivel_salon
         FROM matriculas m
         JOIN alumnos a ON m.alumno_id = a.id
         JOIN horarios h ON m.horario_id = h.id
     """, sqlite3.connect(DB_NAME))
-    
     st.dataframe(df)
-    
-    st.subheader("2. Tabla Horarios Disponibles")
-    df2 = pd.read_sql_query("SELECT id, grupo, hora_inicio, nivel_salon FROM horarios", sqlite3.connect(DB_NAME))
-    st.dataframe(df2)
